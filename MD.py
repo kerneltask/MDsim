@@ -26,15 +26,67 @@ from numba.experimental import jitclass
 ######################################################
 
 kb = 1.380649e-23               # joule/Kelvin
+mm_per_m = 1000
+meter_per_angstrom = 1e-10
+eV_per_J = 6.242e18
 
 ######################################################
-# FUNCTIONS: I/O and plotting
-# not JIT-able
+# JIT FUNCTIONS: conversions and utilities
 ######################################################
 
-# input: .txt file with particle positions; dimensionless mass; dimensionless temperature
-# output: n x d position array; n x d velocity array with system momentum 0
+@njit
+def T_kelvin_to_dimensionless(T_kelvin, epsilon):
+    return T_kelvin * kb / epsilon
+
+@njit
+def dimensional_pressure(pressure, epsilon, sigma):
+    sigma_m = sigma * meter_per_angstrom
+    return pressure * epsilon / (sigma_m ** 3)
+
+@njit
+def dimensional_density(n, mass, cell_side_length, sigma):
+    density = n * mass / cell_side_length
+    return density / sigma ** 3
+
+@njit
+def dimensional_temperature(T_dimensionless, epsilon):
+    return T_dimensionless * epsilon / kb
+
+@njit
+def dimensional_diffusion(diff_coeff, sigma, epsilon, mass):
+    sigma_m = sigma * meter_per_angstrom
+    m2_per_sec = diff_coeff * sigma_m * np.sqrt(epsilon / mass)
+    return m2_per_sec * (mm_per_m ** 2)
+
+# TODO: various other dimensionalizations
+
+@njit
+def cutoff_calcs(r_cut):
+    # calculate constant cutoff terms for continuous force/continuous energy LJ
+    r_cut_inv = 1 / r_cut
+    r_cut_6 = r_cut_inv ** 6
+    dU_r_cut = 24 * r_cut_inv * (2 * r_cut_6**2 - r_cut_6)
+    U_r_cut = 4 * (r_cut_6 ** 2 - r_cut_6)
+    return dU_r_cut, U_r_cut
+
+@njit
+def make_x_axis(frames, dt, record_stride):
+    t = np.empty(frames, dtype=np.float64)
+    step = dt * float(record_stride)
+    for k in range(frames):
+        t[k] = k * step
+    return t
+
+
+######################################################
+# NON-JIT FUNCTIONS: I/O and plotting
+######################################################
+
 def initialize_particle_system(file, mass, desired_T):
+    # read initial positions from .txt file 
+    # generate random velocities
+    # normalize system momentum
+
     start = time.time()
     print("\nInitializing particle system...")
     positions = np.genfromtxt(file, dtype=float)
@@ -50,103 +102,18 @@ def initialize_particle_system(file, mass, desired_T):
     system_momentum = np.average(velocities, axis=0, weights=m)
     # normalizes system momentum to 0
     velocities -= system_momentum
-    print(f"{n} particles initialized in {d} dimensions.")
     end = time.time()
     speed = end - start
-    print(f"({speed:.4f} s)\n")
+    print(f"    {n} particles initialized in {d} dimensions. ({speed:.4f} s)\n")
     return positions, velocities
 
-def write_positions(positions_array, species):
-    print(f"Writing positions to output file \"positions.txt\":")
-    start = time.time()
-    n, d, i = positions_array.shape
-    with open("positions.txt", "w") as f:
-        f.write(f"{n}\n")
-        f.write(f"Properties=species:S:1:pos:R:{d}\n")
-        for frame in range(i):
-            for atom in range(n):
-                x, y, z = positions_array[atom, :, frame]
-                f.write(f"{species} {x:.6f} {y:.6f} {z:.6f}\n")
-    end = time.time()
-    speed = end - start
-    print(f"File writing complete ({speed:.4f} s)\n")
-
-def write_energies(K_array, U_array, total_E_array):
-    print(f"Writing energy values to output file \"energies.csv\":")
-    start = time.time()
-    i = len(total_E_array)
-    with open("energies.csv", "w") as csvfile:
-        w = csv.writer(csvfile)
-        w.writerow(["Kinetic Energy", "Potential Energy", "Total Energy"])
-        for frame in range(i):
-            w.writerow([f"{K_array[frame]:.6f}", f"{U_array[frame]:.6f}", f"{total_E_array[frame]:.6f}"])
-    end = time.time()
-    speed = end - start
-    print(f"File writing complete ({speed:.4f} s)\n")
-
-def write_temperature_pressure(temperature_array, pressure_array):
-    print(f"Writing temperature and pressure values to output file \"temp_pressure.csv\":")
-    start = time.time()
-    i = len(temperature_array)
-    with open("temp_pressure.csv", "w") as csvfile:
-        w = csv.writer(csvfile)
-        w.writerow(["Temperature", "Pressure"])
-        for frame in range(i):
-            w.writerow([f"{temperature_array[frame]:.6f}", f"{pressure_array[frame]:.6f}"])
-    end = time.time()
-    speed = end - start
-    print(f"File writing complete ({speed:4f} s)\n")
-
-def write_time_averages(k_avgs, u_avgs, t_avgs, p_avgs):
-    print(f"Writing time-averaged values to output file \"time_averages.csv\":")
-    start = time.time()
-    i = len(k_avgs)
-    with open("time_averages.csv", "w") as csvfile:
-        w = csv.writer(csvfile)
-        w.writerow(["kinetic energy", "potential energy", "temperature", "pressure"])
-        for frame in range(i):
-            w.writerow([f"{k_avgs[frame]:.6f}", f"{u_avgs[frame]:.6f}", f"{t_avgs[frame]:.6f}", f"{p_avgs[frame]:.6f}"])
-    end = time.time()
-    speed = end - start
-    print(f"File writing complete ({speed:4f} s)\n")
-
-def write_files(system, species):
-    write_positions(system.positions, species)
-    write_energies(system.K_array, system.U_array, system.total_energy_array)
-    write_temperature_pressure(system.temperature_array, system.pressure_array)
-
-def final_outputs(system, num_steps, step_size, thermo_off_timestep, eqbm_timestep, 
-                  species, mass, sigma, epsilon):
-    draw_plots(system, step_size)
-    write_files(system, species)
-
-    final_avg_temp = system.time_average_temperature[-1]
-    final_avg_kelvin = dimensional_temperature(final_avg_temp, epsilon)
-
-    t = make_x_axis(system)
-    diff_coeff = system.get_diffusion_coefficient()
-    slope, intercept, lin_diff_coeff = linear_diffusion_coefficient(
-        system.post_eqbm_frames, system.frames, t, system.MSD_array, system.d)
-    dim_diff_coeff = dimensional_diffusion(lin_diff_coeff, system.d, sigma, epsilon, mass)
-    print(f"d(MSD)/dt: {slope:.4e}")
-
-    # write time averages iff sim ran long enough to equilibrate
-    if num_steps > eqbm_timestep:
-        write_time_averages(system.time_average_K, system.time_average_U, \
-                            system.time_average_temperature, system.time_average_pressure)
-        print(f"Average temperature after equilibration: {final_avg_temp:.4f} ({final_avg_kelvin:.4f} K)")
-    
-    # calculate diffusion coefficient iff thermostat was on during entire simulation
-    if num_steps <= thermo_off_timestep:
-        print(f"Single-value diffusion coefficient: {diff_coeff:.4e}")
-        print(f"Linear regression diffusion coefficient: {lin_diff_coeff:.4e} ({dim_diff_coeff:.4f})")
-        
-    final_temp = system.temperature
-    final_kelvin = dimensional_temperature(final_temp, epsilon)
-    print(f"Final temperature: {final_temp:.4f} ({final_kelvin:.4f} K)")
-
+# TODO: add data callout when thermostat turned off
+# E, T_p, MSD
 def plot_E(t, K, U, E, show=False):
-    # plot energy on 3 axes
+    # plot kinetic, potential, and total energy
+    # for debugging: total energy should be constant if not using thermostat
+
+
     fig, (ax1, ax2, ax3) = plt.subplots(3, 1, 
                                layout='constrained', 
                                sharex='row')
@@ -180,18 +147,13 @@ def plot_E(t, K, U, E, show=False):
         plt.close()
 
 def plot_P(t, P_list, show=False):
+    # plot momentum for all dimensions
+    # for debugging: P should be zero for every dimension during entire simulation
+
     P_array = np.array(P_list)
 
     if P_array.ndim != 2:
         raise ValueError("P_list must be a 2D array-like")
-
-    # normalize to shape (d, frames)
-    if P_array.shape[0] == len(t) and P_array.shape[1] != len(t):
-        P_array = P_array.T
-    elif P_array.shape[1] == len(t):
-        pass
-    else:
-        raise ValueError(f"Time length {len(t)} does not match either axis of momentum array {P_array.shape}")
 
     d, nframes = P_array.shape
 
@@ -216,19 +178,24 @@ def plot_P(t, P_list, show=False):
     else:
         plt.close()
 
-def plot_T_p(t, T_list, p_list, show=False):
+def plot_T_p(t, T_list, p_list, T_avg_list, p_avg_list, show=False):
+    # plot temperature and pressure
+
     T_array = np.array(T_list)
     p_array = np.array(p_list)
+    T_av_array = np.array(T_avg_list)
+    p_av_array = np.array(p_avg_list)
     fig, axes = plt.subplots(2, 1, figsize=(12, 8))
 
     axes[0].plot(t, T_array)
+    axes[0].plot(t, T_av_array)
     axes[0].set(ylabel = 'Temperature')
 
     axes[1].plot(t, p_array)
+    axes[1].plot(t, p_av_array)
     axes[1].set(ylabel = 'Pressure')
 
     fig.supxlabel('Time')
-    fig.suptitle('Instantaneous Temperature and Pressure')
     plt.savefig('temp_pressure_plots.png')
     #print("Saved temperature and pressure plots to \'temp_pressure_plots.png\'.")
 
@@ -239,6 +206,8 @@ def plot_T_p(t, T_list, p_list, show=False):
         plt.close()
 
 def plot_v(velocity_array, temp, time_units, dt, show=False):
+    # histogram of velocities with a Maxwell-Boltzmann fit line
+
     timesteps = int(time_units // dt)
     v_array = np.array(velocity_array[-timesteps:])
     speeds = np.linalg.norm(v_array, axis=2).flatten()
@@ -261,15 +230,20 @@ def plot_v(velocity_array, temp, time_units, dt, show=False):
     else:
         plt.close()
 
-def plot_MSD(t, MSD, show=False):
+def plot_MSD(t, MSD, slope, intercept, show=False):
+    # plot mean squared displacement of the particle system
+
     MSD_array = np.array(MSD)
-    fig, axes = plt.subplots(1, 1, figsize=(6, 8))
 
-    axes.plot(t, MSD_array)
-    axes.set(ylabel = 'Mean Squared Displacement')
+    plt.plot(t, MSD_array, label='Data')
 
-    fig.supxlabel('Time')
-    fig.suptitle('Mean Squared Displacement over Time')
+    plt.gca()
+    lin_reg = intercept + slope * t
+    plt.plot(t, lin_reg, '-r', label='Linear fit')
+
+    plt.xlabel('Time')
+    plt.ylabel('MSD')
+    plt.title('Mean Squared Displacement over Time')
     plt.savefig('MSD.png')
     #print("Saved MSD plot to \'MSD.png\'.")
 
@@ -280,6 +254,9 @@ def plot_MSD(t, MSD, show=False):
         plt.close()
 
 def plot_COM(t, COM_list, show=False):
+    # plot center of mass of the system over time
+    # for debugging: COM should be constant throughout simulation
+
     COM_array = np.array(COM_list)
 
     d, nframes = COM_array.shape
@@ -305,91 +282,196 @@ def plot_COM(t, COM_list, show=False):
     else:
         plt.close()
 
-def make_x_axis(system):
-    return np.arange(0, system.frames, 1)
+def draw_plots(system, t, step_size, MSD_slope, MSD_intercept, show=False):
+    # wrapper function: draw all plots
+    plot_E(t, system.K_array, system.U_array, system.total_energy_array, show)
+    plot_P(t, system.momentum_array, show)
+    plot_T_p(t, system.temperature_array, system.pressure_array, system.time_average_temperature, system.time_average_pressure, show)
+    plot_v(system.velocities, system.temperature, 100, step_size, show)
+    plot_MSD(t, system.MSD_array, MSD_slope, MSD_intercept, show)
+    plot_COM(t, system.COM_array, show)
 
-def draw_plots(system, step_size):
-    t = make_x_axis(system)
-    plot_E(t, system.K_array, system.U_array, system.total_energy_array)
-    plot_P(t, system.momentum_array)
-    plot_T_p(t, system.temperature_array, system.pressure_array)
-    plot_v(system.velocities, system.temperature, 100, step_size)
-    plot_MSD(t, system.MSD_array)
-    plot_COM(t, system.COM_array)
-    print()
+def write_positions(positions_array, sp, cell_side_length, print_time=False):
+    # writes a .txt file in extended XYZ format for visualizing the simulation in OVITO
+    
+    if print_time:
+        print('Writing positions to output file "positions.txt":')
+    start = time.time()
 
-######################################################
-# FUNCTIONS: conversions and calculations
-# JIT-enabled!
-######################################################
+    n, d, frames = positions_array.shape
 
-@njit
-def T_kelvin_to_dimensionless(T_kelvin, epsilon):
-    return T_kelvin * kb / epsilon
+    with open("positions.txt", "w") as f:
+        for frame in range(frames):
+            f.write(f"{n}\n")
+            f.write(f"Lattice=\"{cell_side_length:.6f} 0 0 0 {cell_side_length:.6f} 0 0 0 {cell_side_length:.6f}\" Properties=species:S:1:pos:R:{d}\n")
+            for atom in range(n):
+                x = positions_array[atom, 0, frame]
+                y = positions_array[atom, 1, frame] if d > 1 else 0.0
+                z = positions_array[atom, 2, frame] if d > 2 else 0.0
 
-@njit
-def dimensional_pressure(pressure, epsilon, sigma):
-    return pressure * epsilon / (sigma ** 3)
+                f.write(f"{sp} {x:.6f} {y:.6f} {z:.6f}\n")
 
-@njit
-def dimensional_density(n, mass, cell_side_length, sigma):
-    density = n * mass / cell_side_length
-    return density / sigma ** 3
+    end = time.time()
+    if print_time:
+        print(f"File writing complete ({end - start:.4f} s)\n")
 
-@njit
-def dimensional_temperature(T_dimensionless, epsilon):
-    return T_dimensionless * epsilon / kb
+def write_unrolled_positions(unrolled_array, sp, print_time=False):
+    # writes a .txt file in XYZ format with no periodic boundary conditions
+    # for debugging
 
-@njit
-def dimensional_diffusion(diff_coeff, d, sigma, epsilon, mass):
-    D_red = diff_coeff / (2.0 * d)
-    return D_red * sigma * np.sqrt(epsilon / mass)
+    if print_time:
+        print(f"Writing positions to output file \"unrolled.txt\":")
+    start = time.time()
 
+    n, d, frames = unrolled_array.shape
 
-# TODO: various other dimensionalizations
+    with open("unrolled.txt", "w") as f:
+        for frame in range(frames):
+            f.write(f"{n}\n")
+            f.write(f"Properties=species:S:1:pos:R:{d}\n")
+            for atom in range(n):
+                x = unrolled_array[atom, 0, frame]
+                y = unrolled_array[atom, 1, frame] if d > 1 else 0.0
+                z = unrolled_array[atom, 2, frame] if d > 2 else 0.0
 
-@njit
-def cutoff_calcs(r_cut):
-    # calculate constant cutoff terms for continuous force/continuous energy LJ
-    r_cut_inv = 1 / r_cut
-    r_cut_6 = r_cut_inv ** 6
-    dU_r_cut = 24 * r_cut_inv * (2 * r_cut_6 ** 2 - r_cut_6)
-    U_r_cut = 4 * (r_cut_6 ** 2 - r_cut_6)
-    return dU_r_cut, U_r_cut
+                f.write(f"{sp} {x:.6f} {y:.6f} {z:.6f}\n")
 
-@njit
-def linear_diffusion_coefficient(start, end, t, MSD_array, d):
-    n = end - start
-    if n <= 1:
-        return 0.0, 0.0, 0.0  # slope, intercept, D
+    end = time.time()
+    speed = end - start
+    if print_time:
+        print(f"File writing complete ({speed:.4f} s)\n")
 
-    sx = 0.0
-    sy = 0.0
-    sxx = 0.0
-    sxy = 0.0
+def write_energies(K_array, U_array, total_E_array, print_time=False):
+    # writes a .csv file with kinetic, potential, and total energy values for every recorded simulation frame
+    # energy values are in units of ε
 
-    for i in range(start, end):
-        x = t[i]
-        y = MSD_array[i]
-        sx += x
-        sy += y
-        sxx += x * x
-        sxy += x * y
+    if print_time:
+        print(f"Writing energy values to output file \"energies.csv\":")
+    start = time.time()
+    i = len(total_E_array)
+    with open("energies.csv", "w") as csvfile:
+        w = csv.writer(csvfile)
+        w.writerow(["Kinetic Energy", "Potential Energy", "Total Energy"])
+        for frame in range(i):
+            w.writerow([f"{K_array[frame]:.6f}", f"{U_array[frame]:.6f}", f"{total_E_array[frame]:.6f}"])
+    end = time.time()
+    speed = end - start
+    if print_time:
+        print(f"File writing complete ({speed:.4f} s)\n")
 
-    denom = n * sxx - sx * sx
-    if denom == 0.0:
-        slope = 0.0
-        intercept = sy / n
+def write_temperature_pressure(temperature_array, pressure_array, print_time=False):
+    # writes temperature and pressure values, in reduced LJ units, to a .csv file
+
+    if print_time:
+        print(f"Writing temperature and pressure values to output file \"temp_pressure.csv\":")
+    start = time.time()
+    i = len(temperature_array)
+    with open("temp_pressure.csv", "w") as csvfile:
+        w = csv.writer(csvfile)
+        w.writerow(["Temperature", "Pressure"])
+        for frame in range(i):
+            w.writerow([f"{temperature_array[frame]:.6f}", f"{pressure_array[frame]:.6f}"])
+    end = time.time()
+    speed = end - start
+    if print_time:
+        print(f"File writing complete ({speed:4f} s)\n")
+
+def write_time_averages(k_avgs, u_avgs, t_avgs, p_avgs, print_time=False):
+    # writes time-averaged potential and kinetic energy, temperature and pressure to a .csv file, in reduced LJ units
+
+    if print_time:
+        print(f"Writing time-averaged values to output file \"time_averages.csv\":")
+    start = time.time()
+    i = len(k_avgs)
+    with open("time_averages.csv", "w") as csvfile:
+        w = csv.writer(csvfile)
+        w.writerow(["kinetic energy", "potential energy", "temperature", "pressure"])
+        for frame in range(i):
+            w.writerow([f"{k_avgs[frame]:.6f}", f"{u_avgs[frame]:.6f}", f"{t_avgs[frame]:.6f}", f"{p_avgs[frame]:.6f}"])
+    end = time.time()
+    speed = end - start
+    if print_time:
+        print(f"File writing complete ({speed:4f} s)\n")
+
+def write_files(system, species, print_time=False):
+    # wrapper function to write files
+    # only writes time averages if simulation ran long enough to equilibrate
+    write_positions(system.positions, species, system.L, print_time)
+    write_unrolled_positions(system.unrolled_array, species, print_time)
+    write_energies(system.K_array, system.U_array, system.total_energy_array, print_time)
+    write_temperature_pressure(system.temperature_array, system.pressure_array, print_time)
+    if system.steps > system.eqbm_step:
+        write_time_averages(system.time_average_K, system.time_average_U, \
+                            system.time_average_temperature, system.time_average_pressure)
+
+def final_outputs(system, num_steps, step_size, 
+                  thermo_off_timestep, eqbm_timestep, 
+                  species, mass, sigma, epsilon):
+    # post-processing for simulation:
+    #   writes files
+    #   draws plots
+    #   prints final temperature, pressure, slope of MSD, and self-diffusion coefficient
+    
+    start = time.time()
+
+    t = make_x_axis(system.frames, system.dt, system.record_stride)
+
+    # time-averaged values
+    final_avg_kinetic = system.final_avg_K
+    final_K_dim = final_avg_kinetic * epsilon * eV_per_J
+    final_avg_potential = system.final_avg_U
+    final_U_dim = final_avg_potential * epsilon * eV_per_J
+    final_avg_temp = system.final_avg_temp
+    final_avg_kelvin = dimensional_temperature(final_avg_temp, epsilon)
+    final_avg_pressure = system.final_avg_pressure
+    final_avg_p_dim = dimensional_pressure(final_avg_pressure, epsilon, sigma)
+
+    # instantaneous values
+    final_kinetic = system.K
+    final_K_dim = final_kinetic * epsilon * eV_per_J
+    final_potential = system.U
+    final_U_dim = final_potential * epsilon * eV_per_J
+    final_temp = system.temperature
+    final_kelvin = dimensional_temperature(final_temp, epsilon)
+    final_pressure = system.pressure
+    final_p_dim = dimensional_pressure(final_pressure, epsilon, sigma)
+
+    diff_coeff = system.diffusion_coeff
+    dim_diff_coeff = dimensional_diffusion(diff_coeff, sigma, epsilon, mass)
+
+    draw_plots(system, t, step_size, system.MSD_slope, system.MSD_intercept)
+    write_files(system, species)
+
+    end = time.time()
+    post_processing = end - start
+
+    print(f"Post processing complete. ({post_processing:.4f} s)")
+
+    print(f"    > MSD slope: {system.MSD_slope:.4e}")
+    print(f"    > Diffusion coefficient: {diff_coeff:.4e} ({dim_diff_coeff:.4e} mm²/s)")
+
+    # calculate certain qualities iff thermostat was on during entire simulation
+    if num_steps <= thermo_off_timestep:
+        # cV
+        pass
+
+    # write time averages iff sim ran long enough to equilibrate and thermostat was off during equilibrium
+    if num_steps > eqbm_timestep and eqbm_timestep >= thermo_off_timestep:
+        print("Time-averaged equilibrium values")
+        print(f"    > Average kinetic energy: {final_avg_kinetic:.4f} ({final_K_dim:.4e} eV)")
+        print(f"    > Average potential energy: {final_avg_potential:.4f} ({final_U_dim:.4e} eV)")
+        print(f"    > Average temperature: {final_avg_temp:.4f} ({final_avg_kelvin:.2f} K)")
+        print(f"    > Average pressure: {final_avg_pressure:.4f} ({final_avg_p_dim:.4e} Pa)")
     else:
-        slope = (n * sxy - sx * sy) / denom
-        intercept = (sy - slope * sx) / n
-
-    D = slope / (2.0 * d)
-    return slope, intercept, D
+        print("    Time-averaged values not available; simulation was not run long enough to equilibrate.")
+        print(f"    > Final instantaneous kinetic energy: {final_kinetic:.4f} ({final_K_dim:.4e} eV)")
+        print(f"    > Final instantaneous pressure: {final_potential:.4f} ({final_U_dim:.4e} eV)")
+        print(f"    > Final instantaneous temperature: {final_temp:.4f} ({final_kelvin:.2f} K)")
+        print(f"    > Final instantaneous pressure: {final_pressure:.4f} ({final_p_dim:.4e} Pa)")
 
 
 ######################################################
-# CLASSES: JIT methods
+# CLASS
 ######################################################
 
 spec = [
@@ -413,7 +495,10 @@ spec = [
     ('total_energy', float64),  # total energy
     ('pressure', float64),      # pressure
     ('MSD', float64),           # mean squared displacement
+    ('MSD_slope', float64),     # slope of MSD fit line
+    ('MSD_intercept', float64), # intercept of MSD fit line
     ('diffusion_coeff', float64), # self-diffusion coefficient
+    ('heat_capacity', float64), # constant-volume heat capacity
     ('steps', int32),           # total number of steps
     ('dt', float64),            # timestep size
     ('tau_damp', float64),      # thermostat damping (off if 0)
@@ -435,12 +520,16 @@ spec = [
     ('center_of_mass', float64[:]),     # center of mass (d)
 
     # time-averaged quantities
+    ('final_avg_K', float64),
     ('time_average_K', float64[:]),             # average kinetic energy
+    ('final_avg_U', float64),
     ('time_average_U', float64[:]),             # average potential energy
+    ('final_avg_temp', float64),
     ('time_average_temperature', float64[:]),   # average temperature
+    ('final_avg_pressure', float64),
     ('time_average_pressure', float64[:]),      # average pressure
 
-    # cached vars that rely on large rij calculation
+    # cached vals that rely on large rij calculation
     ('_F_cache', float64[:,:]),
     ('_U_cache', float64),
     ('_virial_cache', float64),
@@ -450,6 +539,7 @@ spec = [
     ('positions', float64[:, :, :]),    # positions over time (n x d x frames)
     ('velocities', float64[:, :, :]),   # velocities over time (frames x n x d)
     ('wrap_history', int32[:, :, :]),   # history of PBC wraps (n x d x frames)
+    ('unrolled_array', float64[:, :, :]),# positions w/o PBCs (n x d x frames)
     ('K_array', float64[:]),            # kinetic energy over time (frames)
     ('U_array', float64[:]),            # potential energy over time (frames)
     ('total_energy_array', float64[:]), # total energy over time (frames)
@@ -492,7 +582,9 @@ class ParticleSystem:
         # recording arrays
         self.positions = np.empty((self.n, self.d, self.frames), dtype=np.float64)
         self.velocities = np.empty((self.frames, self.n, self.d), dtype=np.float64)
-        self.wrap_history = np.zeros((self.n, self.d, self.frames), dtype=np.int32)
+        self.wrap_history = np.empty((self.n, self.d, self.frames), dtype=np.int32)
+        self.unrolled_array = np.empty((self.n, self.d, self.frames), dtype=np.float64)
+
         self.K_array = np.empty(self.frames, dtype=np.float64)
         self.U_array = np.empty(self.frames, dtype=np.float64)
         self.total_energy_array = np.empty(self.frames, dtype=np.float64)
@@ -501,10 +593,16 @@ class ParticleSystem:
         self.pressure_array = np.empty(self.frames, dtype=np.float64)
         self.MSD_array = np.empty(self.frames, dtype=np.float64)
         self.COM_array = np.empty((self.d, self.frames), dtype=np.float64)
+
         self.time_average_K = np.empty(self.frames, dtype=np.float64)
         self.time_average_U = np.empty(self.frames, dtype=np.float64)
         self.time_average_temperature = np.empty(self.frames, dtype=np.float64)
         self.time_average_pressure = np.empty(self.frames, dtype=np.float64)
+
+        self.final_avg_K = 0.0
+        self.final_avg_U = 0.0
+        self.final_avg_temp = 0.0
+        self.final_avg_pressure = 0.0
 
         # system properties and caches
         self.r_cut = float(r_cut)
@@ -530,8 +628,11 @@ class ParticleSystem:
         self.volume = self.L ** self.d
         self.momentum = np.zeros(self.d, dtype=np.float64)
         self.MSD = 0.0
+        self.MSD_slope = 0.0
+        self.MSD_intercept = 0.0
         self.center_of_mass = np.zeros(self.d, dtype=np.float64)
         self.diffusion_coeff = 0.0
+        self.heat_capacity = 0.0
 
     def run_simulation(self):
         for step in range(self.steps):
@@ -561,7 +662,7 @@ class ParticleSystem:
         v += 0.5 * dt * f
         # position full step
         x += dt * v
-        self.PBC()
+        x = self.PBC(x)
         # update force
         self.compute_forces_and_energy()
         f = self._F_cache
@@ -577,7 +678,7 @@ class ParticleSystem:
         v += 0.5 * dt * (f - z * v) 
         # position full step 
         x += dt * v 
-        self.PBC()
+        x = self.PBC(x)
         # update force
         self.compute_forces_and_energy()
         f = self._F_cache
@@ -597,7 +698,6 @@ class ParticleSystem:
         self.momentum = self.get_system_momentum()
         self.temperature = self.get_system_temp()
         self.pressure = self.get_system_pressure()
-        self.MSD = self.get_MSD()
         self.center_of_mass = self.get_center_of_mass()
 
     def record_data(self):
@@ -605,6 +705,7 @@ class ParticleSystem:
         self.velocities[self.frame, :, :] = self.vi
         self.wrap_history[:, :, self.frame] = self.wrap_count
         self.unrolled = self.xi + self.wrap_count * self.L
+        self.unrolled_array[:, :, self.frame] = self.unrolled
 
         self.compute_forces_and_energy()
         K = self.get_total_K()
@@ -615,7 +716,6 @@ class ParticleSystem:
         self.momentum_array[:, self.frame] = self.momentum
         self.temperature_array[self.frame] = self.temperature
         self.pressure_array[self.frame] = self.pressure
-        self.MSD_array[self.frame] = self.MSD
         self.COM_array[:, self.frame] = self.center_of_mass
 
     def time_averages(self, frame, interval):
@@ -626,7 +726,15 @@ class ParticleSystem:
 
     def final_calculations(self):
         self.unrolled = self.xi + self.wrap_count * self.L
-        self.diffusion_coeff = self.get_diffusion_coefficient()
+        self.MSD_array = self.get_MSD_array()
+        self.MSD = float(self.MSD_array[self.frame - 1]) if self.frame > 0 else self.get_MSD()
+        self.MSD_slope, self.MSD_intercept, self.diffusion_coeff = self.get_diffusion_coefficient()
+        self.K = self.get_total_K()
+        self.U = self._U_cache
+        self.final_avg_K = self.calculate_avg_K(0)
+        self.final_avg_U = self.calculate_avg_U(0)
+        self.final_avg_temp = self.calculate_avg_temp(0)
+        self.final_avg_pressure = self.calculate_avg_pressure(0)
 
     def compute_forces_and_energy(self):
         if self._cache_step != self.i:
@@ -634,7 +742,6 @@ class ParticleSystem:
             self._cache_step = self.i
 
     def forces_and_energy(self, xi):
-        # pairwise displacements
         rij = xi[:, np.newaxis, :] - xi[np.newaxis, :, :]
         # NIC
         rij -= self.L * np.round(rij / self.L)
@@ -654,9 +761,8 @@ class ParticleSystem:
         self._U_cache = 0.5 * np.sum(U_pairs)
 
         # LJ force
-        F_mag = np.where(r < self.r_cut,
-                        24 * inv_r**2 * (2 * r6**2 - r6),
-                        0.0)
+        F_mag_raw = 24 * inv_r * (2 * r6**2 - r6)
+        F_mag = np.where(r < self.r_cut, F_mag_raw - self.dU_r_cut, 0.0)
         F_vec = (F_mag[..., np.newaxis] * rij) / r[..., np.newaxis]
         self._F_cache = np.sum(F_vec, axis=1)
 
@@ -709,6 +815,8 @@ class ParticleSystem:
         return P_ideal + P_virial
 
     def calculate_avg_K(self, interval):
+        if interval == 0:
+            return np.mean(self.K_array)
         if self.dt <= 0.0:
             return 0.0
         last = max(1, int(interval / self.dt))
@@ -717,6 +825,8 @@ class ParticleSystem:
         return np.mean(self.K_array[start:end])
 
     def calculate_avg_U(self, interval):
+        if interval == 0:
+            return np.mean(self.U_array)
         if self.dt <= 0.0:
             return 0.0
         last = max(1, int(interval / self.dt))
@@ -725,6 +835,8 @@ class ParticleSystem:
         return np.mean(self.U_array[start:end])
 
     def calculate_avg_temp(self, interval):
+        if interval == 0:
+            return np.mean(self.temperature_array)
         if self.dt <= 0.0:
             return 0.0
         last = max(1, int(interval / self.dt))
@@ -733,6 +845,8 @@ class ParticleSystem:
         return np.mean(self.temperature_array[start:end])
 
     def calculate_avg_pressure(self, interval):
+        if interval == 0:
+            return np.mean(self.pressure_array)
         if self.dt <= 0.0:
             return 0.0
         last = max(1, int(interval / self.dt))
@@ -744,18 +858,78 @@ class ParticleSystem:
         displacement = self.unrolled - self.x0
         displacement_squared = np.sum(displacement ** 2, axis=1)
         return np.mean(displacement_squared)
+    
+    def get_MSD_array(self):
+        n = self.n
+        d = self.d
+        frames = self.frames
+        msd_t = np.empty(frames, dtype=np.float64)
+
+        for t in range(frames):
+            sum_over_particles = 0.0
+            for i in range(n):
+                sum_over_dims = 0.0
+                for j in range(d):
+                    dx = self.unrolled_array[i, j, t] - self.x0[i, j]
+                    sum_over_dims += dx * dx
+                sum_over_particles += sum_over_dims
+            msd_t[t] = sum_over_particles / float(n)
+
+        return msd_t
 
     def get_diffusion_coefficient(self):
-        t = self.dt * self.i
-        divisor = 1 / (2 * self.d * t) # 1/6t
-        return divisor * self.MSD
+        start_frame = (self.eqbm_step + self.record_stride - 1) // self.record_stride
+        if start_frame < 0:
+            start_frame = 0
 
-    def PBC(self):
-        wrap = np.floor(self.xi / self.L).astype(np.int32)
-        # record when PBC is applied
+        end_frame = self.frame
+        n_points = end_frame - start_frame
+        if n_points <= 1:
+            return 0.0, 0.0, 0.0
+
+        t = make_x_axis(self.frames, self.dt, self.record_stride)
+
+        sx = 0.0
+        sy = 0.0
+        sxx = 0.0
+        sxy = 0.0
+        valid_count = 0.0
+
+        for idx in range(start_frame, end_frame):
+            y = self.MSD_array[idx]
+            # skip NaNs or infinities in MSD data
+            if not (y == y) or y == np.inf or y == -np.inf:
+                continue
+            x = t[idx]
+            sx += x
+            sy += y
+            sxx += x * x
+            sxy += x * y
+            valid_count += 1.0
+
+        if valid_count <= 1.0:
+            return 0.0, 0.0, 0.0
+
+        denom = valid_count * sxx - sx * sx
+        if denom == 0.0:
+            slope = 0.0
+            intercept = sy / valid_count
+        else:
+            slope = (valid_count * sxy - sx * sy) / denom
+            intercept = (sy - slope * sx) / valid_count
+
+        D = slope / (2.0 * float(self.d))
+        return slope, intercept, D
+
+    def get_heat_capacity(self):
+        # TODO
+        pass
+
+    def PBC(self, x):
+        wrap = np.floor(x / self.L).astype(np.int32)
         self.wrap_count += wrap
-        # apply PBC
-        self.xi = self.xi % self.L
+        x = x - wrap * self.L
+        return x
 
 ######################################################
 # MAIN: run simulation
@@ -765,10 +939,10 @@ def main():
     start_setup = time.time()
 
     # particle properties
-    species = "Ar"
-    mass = 6.634 * 1e-26
-    sigma = 3.4
-    epsilon = 1.66 * 1e-21
+    species = "Ar"          # argon
+    mass = 6.634 * 1e-26    # kg
+    sigma = 3.4             # Å
+    epsilon = 1.66 * 1e-21  # J
 
     # simulation properties
     tau_damp = 0.05
@@ -776,28 +950,27 @@ def main():
     cell_side_length = 6.8
 
     # temperature
-    guess_kelvin = 130
     des_kelvin = 100
+    guess_kelvin = des_kelvin
     temp_guess = T_kelvin_to_dimensionless(guess_kelvin, epsilon)
     temp_des = T_kelvin_to_dimensionless(des_kelvin, epsilon)
 
     # time scale
-    num_steps = 50000
+    num_steps = 100000
     step_size = 0.002
     record_freq = 10
     time_units = num_steps * step_size
-    eqbm_timestep = 10000
-    thermo_off_timestep = 0
-    # = 0: thermo off (use VV)
-    # = num_steps: thermo on the whole time
+    eqbm_timestep = 50000
+    thermo_off_timestep = eqbm_timestep
+        # = 0:              thermo off (use VV the whole time)
+        # = eqbm_timestep:  bring to desired temperature, then begin data collection (recommended)
+        # = num_steps:      thermo on (use NH the whole time - not recommended for measuring most quantities)
 
     end_setup = time.time()
     thinking_time = end_setup - start_setup
     print(f"\nProgram setup took {thinking_time:.4f} s.")
 
     test_positions, test_velocities = initialize_particle_system("liquid256.txt", 1, temp_des)
-
-    print(f"Setting up particle class...")
 
     start_system_setup = time.time()
     system = ParticleSystem(test_positions, test_velocities, r_cut, 
@@ -807,10 +980,8 @@ def main():
     end_system_setup = time.time()
     system_setup = end_system_setup - start_system_setup
 
-    print(f"Starting temperature: {temp_guess:.4f} ({guess_kelvin} K)")
-    print(f"Desired temperature: {temp_des:.4f} ({des_kelvin} K)")
-    print(f"({system_setup:.4f} s)\n")
-    print(f"Running simulation for {int(time_units)} units of time...\n")
+    print(f"    Particle system setup complete. ({system_setup:.4f} s)\n")
+    print(f"Running simulation for {int(time_units)} units of time...")
     
     start_sim = time.time()
     system.run_simulation()
@@ -818,19 +989,7 @@ def main():
     sim_time = end_sim - start_sim
     avg_per_step = sim_time / num_steps
 
-    print("Simulation ran successfully.")
-    print(f"({sim_time:.4f} s | average {avg_per_step:.4e} per timestep.)\n")
-
-    # print("Array shapes:")
-    # print(f"x: {system.positions.shape}")
-    # print(f"K: {system.K_array.shape}")
-    # print(f"U: {system.U_array.shape}")
-    # print(f"E: {system.total_energy_array.shape}")
-    # print(f"T: {system.temperature_array.shape}")
-    # print(f"P: {system.pressure_array.shape}")
-    # print(f"MSD: {system.MSD_array.shape}")
-    # print(f"COM: {system.COM_array.shape}")
-    # print()
+    print(f"    Simulation ran successfully. ({sim_time:.2f} s | {avg_per_step:.4e} per timestep.)\n")
     
     final_outputs(system, num_steps, step_size, thermo_off_timestep, eqbm_timestep, species, mass, sigma, epsilon)
 
