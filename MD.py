@@ -502,6 +502,7 @@ spec = [
     ('steps', int32),           # total number of steps
     ('dt', float64),            # timestep size
     ('tau_damp', float64),      # thermostat damping (off if 0)
+    ('zeta', float64),          # dynamic friction variable for thermostat
     ('thermo_off', int32),      # when to turn off thermostat
     ('eqbm_step', int32),       # start data collection
     ('post_eqbm_frames', int32),# number of data collection frames
@@ -573,6 +574,7 @@ class ParticleSystem:
         self.thermo_off = int(thermo_off_timestep)
         self.eqbm_step = int(eqbm_timestep)
         self.tau_damp = float(thermostat_damping)
+        self.zeta = self.tau_damp
         self.post_eqbm_frames = int(max(1, (self.steps - self.eqbm_step) // self.record_stride))
 
         # integer wrap counts and unrolled
@@ -650,7 +652,7 @@ class ParticleSystem:
     def simulation_step(self):
         # choose integrator
         if self.tau_damp != 0 and self.i < self.thermo_off:
-            x, v, f = self.nh_step(self.vi, self.xi, self.F, self.dt)
+            x, v, f, self.zeta = self.nh_step(self.vi, self.xi, self.F, self.dt)
         else:
             x, v, f = self.vv_step(self.vi, self.xi, self.F, self.dt)
         
@@ -674,7 +676,7 @@ class ParticleSystem:
         # get temperature
         T_inst = self.get_system_temp()
         # first velocity half step 
-        z = self.zeta(T_inst, self.temp_des, self.tau_damp)
+        z = self.zeta
         v += 0.5 * dt * (f - z * v) 
         # position full step 
         x += dt * v 
@@ -684,10 +686,10 @@ class ParticleSystem:
         f = self._F_cache
         # update temperature at t0 + dt with new KE 
         T_inst = self.get_system_temp()
-        z = self.zeta(T_inst, self.temp_des, self.tau_damp) 
+        z += dt * self.dzeta(T_inst, self.temp_des, self.tau_damp) 
         # second velocity half step 
         v = (v + 0.5 * dt * f) / (1 + 0.5 * dt * z) 
-        return x, v, f
+        return x, v, f, z
 
     def per_step_update(self, x, v, f):
         self.xi = x
@@ -777,7 +779,8 @@ class ParticleSystem:
         self.compute_forces_and_energy()
         return self._U_cache
 
-    def zeta(self, T_inst, T_des, damping):
+    @staticmethod
+    def dzeta(T_inst, T_des, damping):
         damp_factor = damping ** (-2)
         ratio = T_inst / T_des
         return damp_factor * (ratio - 1)
