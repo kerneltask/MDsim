@@ -1,14 +1,3 @@
-'''
-MD.py
-refactored molecular dynamics simulation using numba's JIT acceleration
-
-required packages:
-    numpy
-    matplotlib
-    scipy
-    numba
-'''
-
 ######################################################
 # IMPORTS
 ######################################################
@@ -997,4 +986,3 @@ def main():
     final_outputs(system, num_steps, step_size, thermo_off_timestep, eqbm_timestep, species, mass, sigma, epsilon)
 
 if __name__ == "__main__":
-    main()
