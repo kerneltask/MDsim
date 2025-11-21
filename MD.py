@@ -1,3 +1,14 @@
+'''
+MD.py
+refactored molecular dynamics simulation using numba's JIT acceleration
+
+required packages:
+    numpy
+    matplotlib
+    scipy
+    numba
+'''
+
 ######################################################
 # IMPORTS
 ######################################################
@@ -138,7 +149,6 @@ def plot_E(t, K, U, E, show=False):
 def plot_P(t, P_list, show=False):
     # plot momentum for all dimensions
     # for debugging: P should be zero for every dimension during entire simulation
-
     P_array = np.array(P_list)
 
     if P_array.ndim != 2:
@@ -733,6 +743,7 @@ class ParticleSystem:
             self._cache_step = self.i
 
     def forces_and_energy(self, xi):
+        # bundle and cache expensive RIJ calculations 
         rij = xi[:, np.newaxis, :] - xi[np.newaxis, :, :]
         # NIC
         rij -= self.L * np.round(rij / self.L)
@@ -742,23 +753,57 @@ class ParticleSystem:
         for k in range(r.shape[0]):
             r[k, k] = np.inf
 
-        inv_r = np.where(r < self.r_cut, 1.0 / r, 0.0)
+        # avoid division by 0
+        mask = (r < self.r_cut) & (r > 0.0)
+
+        inv_r = np.zeros_like(r)
+        n = r.shape[0]
+        for i in range(n):
+            for j in range(n):
+                if mask[i, j]:
+                    inv_r[i, j] = 1.0 / r[i, j]
+
         r6 = inv_r**6
 
-        # LJ potential
+        # compute pairwise potential and force magnitudes
+        U_pairs = np.zeros_like(r)
+        F_mag = np.zeros_like(r)
         U_raw = 4 * (r6**2 - r6)
         shift = self.U_r_cut - (r - self.r_cut) * self.dU_r_cut
-        U_pairs = np.where(r < self.r_cut, U_raw - shift, 0.0)
+        for i in range(n):
+            for j in range(n):
+                if mask[i, j]:
+                    U_pairs[i, j] = U_raw[i, j] - shift[i, j]
+                    F_mag_raw = 24 * inv_r[i, j] * (2 * r6[i, j]**2 - r6[i, j])
+                    F_mag[i, j] = F_mag_raw - self.dU_r_cut
+                else:
+                    U_pairs[i, j] = 0.0
+                    F_mag[i, j] = 0.0
+
         self._U_cache = 0.5 * np.sum(U_pairs)
 
-        # LJ force
-        F_mag_raw = 24 * inv_r * (2 * r6**2 - r6)
-        F_mag = np.where(r < self.r_cut, F_mag_raw - self.dU_r_cut, 0.0)
-        F_vec = (F_mag[..., np.newaxis] * rij) / r[..., np.newaxis]
+        # compute norms
+        F_vec = np.empty((n, n, self.d), dtype=np.float64)
+        for i in range(n):
+            for j in range(n):
+                if inv_r[i, j] != 0.0:
+                    for k in range(self.d):
+                        F_vec[i, j, k] = F_mag[i, j] * rij[i, j, k] * inv_r[i, j]
+                else:
+                    for k in range(self.d):
+                        F_vec[i, j, k] = 0.0
+
         self._F_cache = np.sum(F_vec, axis=1)
 
         # virial pressure
-        self._virial_cache = 0.5 * np.sum(np.sum(rij * F_vec, axis=-1))
+        tmp = np.empty((n, n), dtype=np.float64)
+        for i in range(n):
+            for j in range(n):
+                s = 0.0
+                for k in range(self.d):
+                    s += rij[i, j, k] * F_vec[i, j, k]
+                tmp[i, j] = s
+        self._virial_cache = 0.5 * np.sum(tmp)
 
     def LJ_F(self):
         self.compute_forces_and_energy()
@@ -952,7 +997,7 @@ def main():
     step_size = 0.002
     record_freq = 10
     time_units = num_steps * step_size
-    eqbm_timestep = 50000
+    eqbm_timestep = 25000
     thermo_off_timestep = eqbm_timestep
         # = 0:              thermo off (use VV the whole time)
         # = eqbm_timestep:  bring to desired temperature, then begin data collection (recommended)
@@ -973,7 +1018,7 @@ def main():
     system_setup = end_system_setup - start_system_setup
 
     print(f"    Particle system setup complete. ({system_setup:.4f} s)\n")
-    print(f"Running simulation for {int(time_units)} units of time...")
+    print(f"Running simulation for {num_steps} steps ({time_units} units of time)...")
     
     start_sim = time.time()
     system.run_simulation()
@@ -986,3 +1031,4 @@ def main():
     final_outputs(system, num_steps, step_size, thermo_off_timestep, eqbm_timestep, species, mass, sigma, epsilon)
 
 if __name__ == "__main__":
+    main()
