@@ -18,7 +18,7 @@ import csv
 import numpy as np
 import matplotlib.pyplot as plt
 import scipy.stats as sp
-from numba import njit, float64, int32
+from numba import njit, float64, int32, int64
 from numba.experimental import jitclass
 
 ######################################################
@@ -475,12 +475,12 @@ def final_outputs(system, num_steps, step_size,
 
 spec = [
     # scalars
-    ('n', int32),               # number of particles
-    ('d', int32),               # number of dimensions
-    ('i', int32),               # current timestep
-    ('record_stride', int32),   # stride between frames
-    ('frame', int32),           # current frame
-    ('frames', int32),          # number of frames
+    ('n', int64),               # number of particles
+    ('d', int64),               # number of dimensions
+    ('i', int64),               # current timestep
+    ('record_stride', int64),   # stride between frames
+    ('frame', int64),           # current frame
+    ('frames', int64),          # number of frames
     ('r_cut', float64),         # cutoff radius
     ('dU_r_cut', float64),      # cutoff force
     ('U_r_cut', float64),       # cutoff potential
@@ -498,13 +498,13 @@ spec = [
     ('MSD_intercept', float64), # intercept of MSD fit line
     ('diffusion_coeff', float64), # self-diffusion coefficient
     ('heat_capacity', float64), # constant-volume heat capacity
-    ('steps', int32),           # total number of steps
+    ('steps', int64),           # total number of steps
     ('dt', float64),            # timestep size
     ('tau_damp', float64),      # thermostat damping (off if 0)
     ('zeta', float64),          # dynamic friction variable for thermostat
-    ('thermo_off', int32),      # when to turn off thermostat
-    ('eqbm_step', int32),       # start data collection
-    ('post_eqbm_frames', int32),# number of data collection frames
+    ('thermo_off', int64),      # when to turn off thermostat
+    ('eqbm_step', int64),       # start data collection
+    ('post_eqbm_frames', int64),# number of data collection frames
 
     # initial state
     ('x0', float64[:, :]),      # initial positions (n x d)
@@ -514,7 +514,7 @@ spec = [
     ('xi', float64[:, :]),              # current positions (n x d)
     ('vi', float64[:, :]),              # current velocities (n x d)
     ('F', float64[:, :]),               # current forces (n x d)
-    ('wrap_count', int32[:, :]),        # PBC wrap count (n x d)
+    ('wrap_count', int64[:, :]),        # PBC wrap count (n x d)
     ('unrolled', float64[:, :]),        # unwrapped positions (n x d)
     ('momentum', float64[:]),           # system momentum (d)
     ('center_of_mass', float64[:]),     # center of mass (d)
@@ -533,21 +533,21 @@ spec = [
     ('_F_cache', float64[:,:]),
     ('_U_cache', float64),
     ('_virial_cache', float64),
-    ('_cache_step', int32),
+    ('_cache_step', int64),
 
     # recorded arrays
-    ('positions', float64[:, :, :]),    # positions over time (n x d x frames)
-    ('velocities', float64[:, :, :]),   # velocities over time (frames x n x d)
-    ('wrap_history', int32[:, :, :]),   # history of PBC wraps (n x d x frames)
-    ('unrolled_array', float64[:, :, :]),# positions w/o PBCs (n x d x frames)
-    ('K_array', float64[:]),            # kinetic energy over time (frames)
-    ('U_array', float64[:]),            # potential energy over time (frames)
-    ('total_energy_array', float64[:]), # total energy over time (frames)
-    ('temperature_array', float64[:]),  # temperature over time (frames)
-    ('pressure_array', float64[:]),     # pressure over time (frames)
-    ('momentum_array', float64[:, :]),  # momentum over time (d x frames)
-    ('MSD_array', float64[:]),          # MSD over time (frames)
-    ('COM_array', float64[:, :]),       # center of mass over time (d x frames)
+    ('positions', float64[:, :, :]),        # positions over time (n x d x frames)
+    ('velocities', float64[:, :, :]),       # velocities over time (frames x n x d)
+    ('wrap_history', int64[:, :, :]),       # history of PBC wraps (n x d x frames)
+    ('unrolled_array', float64[:, :, :]),   # positions w/o PBCs (n x d x frames)
+    ('K_array', float64[:]),                # kinetic energy over time (frames)
+    ('U_array', float64[:]),                # potential energy over time (frames)
+    ('total_energy_array', float64[:]),     # total energy over time (frames)
+    ('temperature_array', float64[:]),      # temperature over time (frames)
+    ('pressure_array', float64[:]),         # pressure over time (frames)
+    ('momentum_array', float64[:, :]),      # momentum over time (d x frames)
+    ('MSD_array', float64[:]),              # MSD over time (frames)
+    ('COM_array', float64[:, :]),           # center of mass over time (d x frames)
 ]
 
 @jitclass(spec)
@@ -577,13 +577,13 @@ class ParticleSystem:
         self.post_eqbm_frames = int(max(1, (self.steps - self.eqbm_step) // self.record_stride))
 
         # integer wrap counts and unrolled
-        self.wrap_count = np.zeros((self.n, self.d), dtype=np.int32)
+        self.wrap_count = np.zeros((self.n, self.d), dtype=np.int64)
         self.unrolled = self.xi.copy()
 
         # recording arrays
         self.positions = np.empty((self.n, self.d, self.frames), dtype=np.float64)
         self.velocities = np.empty((self.frames, self.n, self.d), dtype=np.float64)
-        self.wrap_history = np.empty((self.n, self.d, self.frames), dtype=np.int32)
+        self.wrap_history = np.empty((self.n, self.d, self.frames), dtype=np.int64)
         self.unrolled_array = np.empty((self.n, self.d, self.frames), dtype=np.float64)
 
         self.K_array = np.empty(self.frames, dtype=np.float64)
@@ -963,7 +963,7 @@ class ParticleSystem:
         pass
 
     def PBC(self, x):
-        wrap = np.floor(x / self.L).astype(np.int32)
+        wrap = np.floor(x / self.L).astype(np.int64)
         self.wrap_count += wrap
         x = x - wrap * self.L
         return x
@@ -993,7 +993,7 @@ def main():
     temp_des = T_kelvin_to_dimensionless(des_kelvin, epsilon)
 
     # time scale
-    num_steps = 100000
+    num_steps = 1000
     step_size = 0.002
     record_freq = 10
     time_units = num_steps * step_size
