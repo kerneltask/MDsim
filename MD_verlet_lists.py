@@ -1,6 +1,7 @@
 '''
-MD.py
+MD_verlet_lists.py
 refactored molecular dynamics simulation using numba's JIT acceleration
+uses Verlet lists for O(N^3/2) pair computation
 
 required packages:
     numpy
@@ -77,7 +78,6 @@ def make_x_axis(frames, dt, record_stride):
         t[k] = k * step
     return t
 
-
 ######################################################
 # NON-JIT FUNCTIONS: I/O and plotting
 ######################################################
@@ -113,16 +113,20 @@ def plot_E(t, K, U, E, show=False):
     # plot kinetic, potential, and total energy
     # for debugging: total energy should be constant if not using thermostat
 
+    # replace inf/nan with nan to skip plotting
+    K_clean = np.where(np.isfinite(K), K, np.nan)
+    U_clean = np.where(np.isfinite(U), U, np.nan)
+    E_clean = np.where(np.isfinite(E), E, np.nan)
 
     fig, (ax1, ax2, ax3) = plt.subplots(3, 1, 
                                layout='constrained', 
                                sharex='row')
 
     # plot kinetic and potential energy
-    ax1.plot(t, K, '-g')
+    ax1.plot(t, K_clean, '-g')
     ax1.set(ylabel='Kinetic Energy')
     y1b, y1t = ax1.get_ylim()
-    ax2.plot(t, U, '-b')
+    ax2.plot(t, U_clean, '-b')
     ax2.set(ylabel = 'Potential Energy')
     y2b, y2t = ax2.get_ylim()
 
@@ -130,7 +134,7 @@ def plot_E(t, K, U, E, show=False):
     axislimits = (y1b, y1t, y2b, y2t)
 
     #plot total energy
-    ax3.plot(t, E, '-k')
+    ax3.plot(t, E_clean, '-k')
     ax3.set(ylabel = 'Total Energy', ylim=(min(axislimits), max(axislimits)))
 
     # figure properties
@@ -162,7 +166,8 @@ def plot_P(t, P_list, show=False):
     labels = ['x', 'y', 'z']
     for i in range(d):
         lbl = labels[i] if i < len(labels) else str(i)
-        axs[i].plot(t, P_array[i, :], label=f'P_{lbl}')
+        P_clean = np.where(np.isfinite(P_array[i, :]), P_array[i, :], np.nan)
+        axs[i].plot(t, P_clean, label=f'P_{lbl}')
         axs[i].set(ylabel=f'Momentum in {lbl}', ylim=(-0.01, 0.01))
         axs[i].legend()
 
@@ -184,14 +189,21 @@ def plot_T_p(t, T_list, p_list, T_avg_list, p_avg_list, show=False):
     p_array = np.array(p_list)
     T_av_array = np.array(T_avg_list)
     p_av_array = np.array(p_avg_list)
+    
+    # replace inf/nan with nan to skip plotting
+    T_clean = np.where(np.isfinite(T_array), T_array, np.nan)
+    p_clean = np.where(np.isfinite(p_array), p_array, np.nan)
+    T_av_clean = np.where(np.isfinite(T_av_array), T_av_array, np.nan)
+    p_av_clean = np.where(np.isfinite(p_av_array), p_av_array, np.nan)
+    
     fig, axes = plt.subplots(2, 1, figsize=(12, 8))
 
-    axes[0].plot(t, T_array)
-    axes[0].plot(t, T_av_array)
+    axes[0].plot(t, T_clean)
+    axes[0].plot(t, T_av_clean)
     axes[0].set(ylabel = 'Temperature')
 
-    axes[1].plot(t, p_array)
-    axes[1].plot(t, p_av_array)
+    axes[1].plot(t, p_clean)
+    axes[1].plot(t, p_av_clean)
     axes[1].set(ylabel = 'Pressure')
 
     fig.supxlabel('Time')
@@ -210,14 +222,20 @@ def plot_v(velocity_array, temp, time_units, dt, show=False):
     timesteps = int(time_units // dt)
     v_array = np.array(velocity_array[-timesteps:])
     speeds = np.linalg.norm(v_array, axis=2).flatten()
+    speeds_clean = speeds[np.isfinite(speeds)]
 
-    plt.hist(speeds, bins=200, density=True, alpha=0.7, color='steelblue')
+    if len(speeds_clean) == 0:
+        print("Warning: no finite velocity data to plot")
+        return
+    
+    plt.hist(speeds_clean, bins=200, density=True, alpha=0.7, color='steelblue')
     plt.xlabel("Velocity")
     plt.ylabel("Probability density")
     plt.title("Velocity distribution")
 
-    x = np.linspace(0, speeds.max(), 200)
-    plt.plot(x, sp.maxwell.pdf(x, scale=np.sqrt(float(temp))), 'r-', lw=2, label="Maxwell–Boltzmann")
+    x = np.linspace(0, speeds_clean.max(), 200)
+    if np.isfinite(temp) and temp > 0:
+         plt.plot(x, sp.maxwell.pdf(x, scale=np.sqrt(float(temp))), 'r-', lw=2, label="Maxwell–Boltzmann")
     plt.legend()
     
     plt.savefig('velocity_hist.png')
@@ -233,12 +251,14 @@ def plot_MSD(t, MSD, slope, intercept, show=False):
     # plot mean squared displacement of the particle system
 
     MSD_array = np.array(MSD)
+    MSD_clean = np.where(np.isfinite(MSD_array), MSD_array, np.nan)
 
-    plt.plot(t, MSD_array, label='Data')
+    plt.plot(t, MSD_clean, label='Data')
 
     plt.gca()
     lin_reg = intercept + slope * t
-    plt.plot(t, lin_reg, '-r', label='Linear fit')
+    lin_reg_clean = np.where(np.isfinite(lin_reg), lin_reg, np.nan)
+    plt.plot(t, lin_reg_clean, '-r', label='Linear fit')
 
     plt.xlabel('Time')
     plt.ylabel('MSD')
@@ -266,7 +286,8 @@ def plot_COM(t, COM_list, show=False):
     labels = ['x', 'y', 'z']
     for i in range(d):
         lbl = labels[i] if i < len(labels) else str(i)
-        axs[i].plot(t, COM_array[i, :], label=f'P_{lbl}')
+        COM_clean = np.where(np.isfinite(COM_array[i, :]), COM_array[i, :], np.nan)
+        axs[i].plot(t, COM_clean, label=f'P_{lbl}')
         axs[i].set(ylabel=f'Center of Mass in {lbl}')
         axs[i].legend()
 
@@ -638,7 +659,6 @@ class ParticleSystem:
         # verlet list initialization
         self.skin = float(verlet_skin)
         self.verlet_r_squared = (self.r_cut + self.skin) ** 2
-        # allocate maximal storage: at most n neighbors per particle (upper bound)
         self.verlet_list = -1 * np.ones((n, n), dtype=np.int64)
         self.verlet_counts = np.zeros(n, dtype=np.int64)
         # store unwrapped positions used to decide when to rebuild the list
@@ -1058,7 +1078,7 @@ def main():
     # simulation properties
     tau_damp = 0.05
     r_cut = 2.5
-    cell_side_length = 6.8
+    cell_side_length = 10
     skin_thickness = 0.2
 
     # temperature
@@ -1068,11 +1088,11 @@ def main():
     temp_des = T_kelvin_to_dimensionless(des_kelvin, epsilon)
 
     # time scale
-    num_steps = 1000
+    num_steps = 100000
     step_size = 0.002
     record_freq = 10
     time_units = num_steps * step_size
-    eqbm_timestep = 25000
+    eqbm_timestep = 50000
     thermo_off_timestep = eqbm_timestep
         # = 0:              thermo off (use VV the whole time)
         # = eqbm_timestep:  bring to desired temperature, then begin data collection (recommended)
@@ -1103,8 +1123,9 @@ def main():
     sim_time = end_sim - start_sim
     avg_per_step = sim_time / num_steps
 
-    print(f"    Simulation ran successfully. ({sim_time:.2f} s | {avg_per_step:.4e} per timestep.)\n")
-    
+    print(f"    Simulation ran successfully with Verlet list implementation. ({sim_time:.2f} s | {avg_per_step:.4e} per timestep.)\n")
+    print(f"    Verlet lists were computed {system.num_verlet_builds} times.")
+
     final_outputs(system, num_steps, step_size, thermo_off_timestep, eqbm_timestep, species, mass, sigma, epsilon)
 
 if __name__ == "__main__":
