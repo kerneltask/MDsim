@@ -1,22 +1,46 @@
-MD.py
+# MDsim
 
-JIT-accelerated molecular dynamics simulator for Python
+MDsim contains three Python programs for molecular dynamics simulation. It uses Velocity Verlet integration with an optional Nose-Hoover thermostat for temperature control.
 
-Uses Velocity Verlet to calculate particle positions with optional Nosé-Hoover thermostat to control temperature
+This program was written for 12-623, Molecular Simulation of Materials at Carnegie Mellon University.
 
-Calculates system and material properties:
+MD.py: benchmark program with O(N^2) pair calculations
+MD_verlet_list.py: modification of MD.py that implements Verlet lists for O(N^3/2) pair calculations
+MD_cell_list.py: modification of MD.py that implements cell lists for O(N) pair calculations
 
-    Temperature
-    Pressure
-    Energies (kinetic and potential)
-    Mean squared displacement (MSD)
-    Self-diffusion coefficient
+## Output
 
-Produces an extended XYZ file for visualization in OVITO
+The simulation provides the following output for validation of expected physical properties:
 
-Required packages:
+XYZ format files for visualization in OVITO:
 
-    numpy
-    numba
-    matplotlib
-    scipy
+* positions.txt (applied periodic boundary conditions)
+* unrolled.txt (no PBCs)
+
+Plots:
+
+* COM_plot
+* energy_plot
+* momentum_plot
+* velocity_hist
+* temp_pressure_plots
+* MSD
+
+CSV files:
+
+* energies
+* temp_pressure
+* time_averages
+
+Console output:
+
+* Time-averaged energy, temperature, and pressure of the system
+* Self-diffusion coefficient
+* Slope of mean-squared displacement over time
+* Simulation time
+
+## Modifying
+
+The program expects non-dimensional quantities, except for temperature, which can be entered in Kelvin.
+
+It has not been fully tested in dimensions other than 3D.
