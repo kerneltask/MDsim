@@ -1,6 +1,6 @@
 # MDsim
 
-MDsim contains three Python programs for molecular dynamics simulation. It uses Velocity Verlet integration with an optional Nose-Hoover thermostat for temperature control.
+MDsim contains three Python programs for molecular dynamics simulation of Lennard-Jones particles. It uses Velocity Verlet integration with an optional Nose-Hoover thermostat for temperature control.
 
 This program was written for 12-623, Molecular Simulation of Materials at Carnegie Mellon University.
 
@@ -39,8 +39,10 @@ Console output:
 * Slope of mean-squared displacement over time
 * Simulation time
 
-## Modifying
+## Disclaimers
 
-The program expects non-dimensional quantities, except for temperature, which can be entered in Kelvin.
+System parameters may be altered in main()
+
+The program expects quantities in reduced Lennard-Jones units, except for temperature, which can be entered in Kelvin.
 
 It has not been fully tested in dimensions other than 3D.
