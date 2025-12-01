@@ -984,7 +984,7 @@ def main():
     # simulation properties
     tau_damp = 0.05
     r_cut = 2.5
-    cell_side_length = 6.8
+    cell_side_length = 10
 
     # temperature
     des_kelvin = 100
@@ -993,7 +993,7 @@ def main():
     temp_des = T_kelvin_to_dimensionless(des_kelvin, epsilon)
 
     # time scale
-    num_steps = 1000
+    num_steps = 100000
     step_size = 0.002
     record_freq = 10
     time_units = num_steps * step_size
