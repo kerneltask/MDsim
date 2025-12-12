@@ -18,7 +18,7 @@ import time
 import csv
 import numpy as np
 import matplotlib.pyplot as plt
-# import scipy.stats as sp
+import scipy.stats as sp
 from numba import njit, float64, int32, int64
 from numba.experimental import jitclass
 
@@ -77,40 +77,6 @@ def make_x_axis(frames, dt, record_stride):
     for k in range(frames):
         t[k] = k * step
     return t
-
-@njit
-def compute_neighbor_forces(pos_i, neighbor_positions, L, r_cut, U_r_cut, dU_r_cut):
-    # computes vectorized force contribution for a particle given its neighbors
-    n_neighbors = neighbor_positions.shape[0]
-    d = neighbor_positions.shape[1]
-    
-    rij = pos_i[np.newaxis, :] - neighbor_positions  # (n_neighbors, d)
-    rij -= L * np.round(rij / L)  # PBC
-    
-    r2 = np.sum(rij ** 2, axis=1)  # (n_neighbors,)
-    r = np.sqrt(r2)
-    
-    mask = (r < r_cut) & (r > 0.0)
-    
-    inv_r = np.zeros(n_neighbors)
-    inv_r[mask] = 1.0 / r[mask]
-    
-    r6 = inv_r ** 6
-    
-    U_raw = 4.0 * (r6 ** 2 - r6)
-    shift = U_r_cut - (r - r_cut) * dU_r_cut
-    U_pairs = np.where(mask, U_raw - shift, 0.0)
-    
-    F_mag_raw = 24.0 * inv_r * (2.0 * r6 ** 2 - r6)
-    F_mag = np.where(mask, F_mag_raw - dU_r_cut, 0.0)
-    
-    F_vec = F_mag[:, np.newaxis] * rij * inv_r[:, np.newaxis]
-    F_i = np.sum(F_vec, axis=0)
-    
-    U_contrib = 0.5 * np.sum(U_pairs)
-    virial_contrib = 0.5 * np.sum(np.sum(rij * F_vec, axis=1))
-    
-    return F_i, U_contrib, virial_contrib
 
 ######################################################
 # NON-JIT FUNCTIONS: I/O and plotting
@@ -267,10 +233,10 @@ def plot_v(velocity_array, temp, time_units, dt, show=False):
     plt.ylabel("Probability density")
     plt.title("Velocity distribution")
 
-    # x = np.linspace(0, speeds_clean.max(), 200)
-    # if np.isfinite(temp) and temp > 0:
-    #     plt.plot(x, sp.maxwell.pdf(x, scale=np.sqrt(float(temp))), 'r-', lw=2, label="Maxwell–Boltzmann")
-    # plt.legend()
+    x = np.linspace(0, speeds_clean.max(), 200)
+    if np.isfinite(temp) and temp > 0:
+        plt.plot(x, sp.maxwell.pdf(x, scale=np.sqrt(float(temp))), 'r-', lw=2, label="Maxwell–Boltzmann")
+    plt.legend()
     
     plt.savefig('velocity_hist.png')
     #print("Saved velocity histogram to \'velocity_hist.png\'.")
@@ -605,13 +571,12 @@ spec = [
     ('COM_array', float64[:, :]),           # center of mass over time (d x frames)
 
     # cell list attributes
-    ('cell_size', float64),                 # cell size l > r_cut
-    ('n_cells', int64[:]),                  # number of cells in each dimension
-    ('cell_particles', int64[:, :]),        # linked list: cell index -> particle indices (max_particles_per_cell x n_cells_total)
-    ('cell_particle_count', int64[:]),      # count of particles in each cell (n_cells_total)
-    ('particle_cell', int64[:]),            # particle index -> cell index
-    ('max_particles_per_cell', int64),      # max particles per cell
-    ('cell_list_builds', int64)             # number of times cell list is built
+    ('cell_size', float64),
+    ('n_cells', int64[:]),
+    ('head', int64[:]),              # head[cell_idx] = first particle in cell
+    ('next', int64[:]),              # next[particle_idx] = next particle in same cell
+    ('particle_cell', int64[:]),     # particle_cell[i] = which cell particle i is in
+    ('cell_list_builds', int64)      # number of times cell list is built
 ]
 
 @jitclass(spec)
@@ -665,13 +630,14 @@ class ParticleSystem:
             n_cells_per_dim = 1
         self.n_cells = np.array([n_cells_per_dim] * self.d, dtype=np.int64)
         self.cell_size = float(self.L) / float(n_cells_per_dim)
-        self.max_particles_per_cell = self.n
         n_cells_total = np.prod(self.n_cells)
 
-        self.cell_particles = np.full((self.max_particles_per_cell, n_cells_total), -1, dtype=np.int64)
-        self.cell_particle_count = np.zeros(n_cells_total, dtype=np.int64)
+        self.head = np.full(n_cells_total, -1, dtype=np.int64)
+        self.next = np.full(self.n, -1, dtype=np.int64)
         self.particle_cell = np.full(self.n, -1, dtype=np.int64)
         self.cell_list_builds = 0
+
+        self.build_cell_list()
 
         self.build_cell_list()
 
@@ -829,108 +795,159 @@ class ParticleSystem:
         d = self.d
         L = self.L
         r_cut = self.r_cut
+        r_cut_sq = r_cut * r_cut
         U_r_cut = self.U_r_cut
         dU_r_cut = self.dU_r_cut
-        n_cells = self.n_cells
-        cell_particles = self.cell_particles
-
+        
         F = np.zeros((n, d), dtype=np.float64)
         U = 0.0
         virial = 0.0
-
+        
         if d == 3:
             for i in range(n):
                 pos_i = xi[i]
                 cell_idx = self.get_cell_index(pos_i)
-
-                neighbor_indices = np.empty(n, dtype=np.int64)
-                neighbor_count = 0
-
-                cx = cell_idx // (n_cells[1] * n_cells[2])
-                cy = (cell_idx // n_cells[2]) % n_cells[1]
-                cz = cell_idx % n_cells[2]
-
+                
+                cx = cell_idx // (self.n_cells[1] * self.n_cells[2])
+                cy = (cell_idx // self.n_cells[2]) % self.n_cells[1]
+                cz = cell_idx % self.n_cells[2]
+                
                 for dx in range(-1, 2):
                     for dy in range(-1, 2):
                         for dz in range(-1, 2):
-                            ncx = (cx + dx) % n_cells[0]
-                            ncy = (cy + dy) % n_cells[1]
-                            ncz = (cz + dz) % n_cells[2]
-                            neighbor_cell_idx = ncx * n_cells[1] * n_cells[2] + ncy * n_cells[2] + ncz
-
-                            for slot in range(self.cell_particle_count[neighbor_cell_idx]):
-                                j = cell_particles[slot, neighbor_cell_idx]
-                                if j >= 0 and j != i:
-                                    neighbor_indices[neighbor_count] = j
-                                    neighbor_count += 1
-
-                if neighbor_count > 0:
-                    neighbor_positions = xi[neighbor_indices[:neighbor_count]]
-                    F_i, U_i, virial_i = compute_neighbor_forces(
-                        pos_i, neighbor_positions, L, r_cut, U_r_cut, dU_r_cut
-                    )
-                    F[i] = F_i
-                    U += U_i
-                    virial += virial_i
-
+                            ncx = (cx + dx) % self.n_cells[0]
+                            ncy = (cy + dy) % self.n_cells[1]
+                            ncz = (cz + dz) % self.n_cells[2]
+                            neighbor_cell_idx = ncx * self.n_cells[1] * self.n_cells[2] + ncy * self.n_cells[2] + ncz
+                            
+                            # traverse linked list
+                            j = self.head[neighbor_cell_idx]
+                            while j != -1:
+                                if j > i:
+                                    dx_ij = pos_i[0] - xi[j, 0]
+                                    dy_ij = pos_i[1] - xi[j, 1]
+                                    dz_ij = pos_i[2] - xi[j, 2]
+                                    
+                                    dx_ij -= L * np.round(dx_ij / L)
+                                    dy_ij -= L * np.round(dy_ij / L)
+                                    dz_ij -= L * np.round(dz_ij / L)
+                                    
+                                    r_sq = dx_ij * dx_ij + dy_ij * dy_ij + dz_ij * dz_ij
+                                    
+                                    if r_sq < r_cut_sq and r_sq > 0.0:
+                                        r = np.sqrt(r_sq)
+                                        inv_r = 1.0 / r
+                                        r6 = inv_r ** 6
+                                        r12 = r6 * r6
+                                        
+                                        U_pair = 4.0 * (r12 - r6)
+                                        shift = U_r_cut - (r - r_cut) * dU_r_cut
+                                        U += U_pair - shift
+                                        
+                                        F_mag = 24.0 * inv_r * (2.0 * r12 - r6) - dU_r_cut
+                                        
+                                        F_x = F_mag * inv_r * dx_ij
+                                        F_y = F_mag * inv_r * dy_ij
+                                        F_z = F_mag * inv_r * dz_ij
+                                        
+                                        F[i, 0] += F_x
+                                        F[i, 1] += F_y
+                                        F[i, 2] += F_z
+                                        F[j, 0] -= F_x
+                                        F[j, 1] -= F_y
+                                        F[j, 2] -= F_z
+                                        
+                                        virial += dx_ij * F_x + dy_ij * F_y + dz_ij * F_z
+                                
+                                j = self.next[j]  # move to next particle in list
+        
         elif d == 2:
             for i in range(n):
                 pos_i = xi[i]
                 cell_idx = self.get_cell_index(pos_i)
-
-                neighbor_indices = np.empty(n, dtype=np.int64)
-                neighbor_count = 0
-
-                cx = cell_idx // n_cells[1]
-                cy = cell_idx % n_cells[1]
-
+                
+                cx = cell_idx // self.n_cells[1]
+                cy = cell_idx % self.n_cells[1]
+                
                 for dx in range(-1, 2):
                     for dy in range(-1, 2):
-                        ncx = (cx + dx) % n_cells[0]
-                        ncy = (cy + dy) % n_cells[1]
-                        neighbor_cell_idx = ncx * n_cells[1] + ncy
-
-                        for slot in range(self.cell_particle_count[neighbor_cell_idx]):
-                            j = cell_particles[slot, neighbor_cell_idx]
-                            if j >= 0 and j != i:
-                                neighbor_indices[neighbor_count] = j
-                                neighbor_count += 1
-
-                if neighbor_count > 0:
-                    neighbor_positions = xi[neighbor_indices[:neighbor_count]]
-                    F_i, U_i, virial_i = compute_neighbor_forces(
-                        pos_i, neighbor_positions, L, r_cut, U_r_cut, dU_r_cut
-                    )
-                    F[i] = F_i
-                    U += U_i
-                    virial += virial_i
-
+                        ncx = (cx + dx) % self.n_cells[0]
+                        ncy = (cy + dy) % self.n_cells[1]
+                        neighbor_cell_idx = ncx * self.n_cells[1] + ncy
+                        
+                        # Traverse linked list
+                        j = self.head[neighbor_cell_idx]
+                        while j != -1:
+                            if j > i:
+                                dx_ij = pos_i[0] - xi[j, 0]
+                                dy_ij = pos_i[1] - xi[j, 1]
+                                
+                                dx_ij -= L * np.round(dx_ij / L)
+                                dy_ij -= L * np.round(dy_ij / L)
+                                
+                                r_sq = dx_ij * dx_ij + dy_ij * dy_ij
+                                
+                                if r_sq < r_cut_sq and r_sq > 0.0:
+                                    r = np.sqrt(r_sq)
+                                    inv_r = 1.0 / r
+                                    r6 = inv_r ** 6
+                                    r12 = r6 * r6
+                                    
+                                    U_pair = 4.0 * (r12 - r6)
+                                    shift = U_r_cut - (r - r_cut) * dU_r_cut
+                                    U += U_pair - shift
+                                    
+                                    F_mag = 24.0 * inv_r * (2.0 * r12 - r6) - dU_r_cut
+                                    
+                                    F_x = F_mag * inv_r * dx_ij
+                                    F_y = F_mag * inv_r * dy_ij
+                                    
+                                    F[i, 0] += F_x
+                                    F[i, 1] += F_y
+                                    F[j, 0] -= F_x
+                                    F[j, 1] -= F_y
+                                    
+                                    virial += dx_ij * F_x + dy_ij * F_y
+                            
+                            j = self.next[j]  # Move to next particle in list
+        
         else:  # 1D
             for i in range(n):
                 pos_i = xi[i]
                 cell_idx = self.get_cell_index(pos_i)
-
-                neighbor_indices = np.empty(n, dtype=np.int64)
-                neighbor_count = 0
-
+                
                 for dx in range(-1, 2):
-                    ncx = (cell_idx + dx) % n_cells[0]
-
-                    for slot in range(self.cell_particle_count[ncx]):
-                        j = cell_particles[slot, ncx]
-                        if j >= 0 and j != i:
-                            neighbor_indices[neighbor_count] = j
-                            neighbor_count += 1
-
-                if neighbor_count > 0:
-                    neighbor_positions = xi[neighbor_indices[:neighbor_count]]
-                    F_i, U_i, virial_i = compute_neighbor_forces(
-                        pos_i, neighbor_positions, L, r_cut, U_r_cut, dU_r_cut
-                    )
-                    F[i] = F_i
-                    U += U_i
-                    virial += virial_i
-
+                    ncx = (cell_idx + dx) % self.n_cells[0]
+                    
+                    # Traverse linked list
+                    j = self.head[ncx]
+                    while j != -1:
+                        if j > i:
+                            dx_ij = pos_i[0] - xi[j, 0]
+                            dx_ij -= L * np.round(dx_ij / L)
+                            
+                            r_sq = dx_ij * dx_ij
+                            
+                            if r_sq < r_cut_sq and r_sq > 0.0:
+                                r = np.sqrt(r_sq)
+                                inv_r = 1.0 / r
+                                r6 = inv_r ** 6
+                                r12 = r6 * r6
+                                
+                                U_pair = 4.0 * (r12 - r6)
+                                shift = U_r_cut - (r - r_cut) * dU_r_cut
+                                U += U_pair - shift
+                                
+                                F_mag = 24.0 * inv_r * (2.0 * r12 - r6) - dU_r_cut
+                                F_x = F_mag * inv_r * dx_ij
+                                
+                                F[i, 0] += F_x
+                                F[j, 0] -= F_x
+                                
+                                virial += dx_ij * F_x
+                        
+                        j = self.next[j]  # move to next particle in list
+        
         self._F_cache = F
         self._U_cache = U
         self._virial_cache = virial
@@ -956,21 +973,19 @@ class ParticleSystem:
         return False
 
     def build_cell_list(self):
-        # clear
-        self.cell_particles.fill(-1)
-        self.cell_particle_count.fill(0)
-        self.particle_cell.fill(-1)
-        cell_counts = np.zeros(np.prod(self.n_cells), dtype=np.int64)
-
+        # clear lists
+        self.head.fill(-1)
+        self.next.fill(-1)
+        
+        # build linked lists
         for i in range(self.n):
             cell_idx = self.get_cell_index(self.xi[i])
             self.particle_cell[i] = cell_idx
-            slot = cell_counts[cell_idx]
-            if slot < self.max_particles_per_cell:
-                self.cell_particles[slot, cell_idx] = i
-                cell_counts[cell_idx] += 1
+            
+            # insert at head of linked list
+            self.next[i] = self.head[cell_idx]
+            self.head[cell_idx] = i
         
-        self.cell_particle_count = cell_counts
         self.cell_list_builds += 1
 
     def LJ_F(self):
@@ -1152,7 +1167,7 @@ def main():
     # simulation properties
     tau_damp = 0.05
     r_cut = 2.5
-    cell_side_length = 10
+    cell_side_length = 13.6
 
     # temperature
     des_kelvin = 100
@@ -1161,11 +1176,11 @@ def main():
     temp_des = T_kelvin_to_dimensionless(des_kelvin, epsilon)
 
     # time scale
-    num_steps = 100000
+    num_steps = 10000
     step_size = 0.002
     record_freq = 10
     time_units = num_steps * step_size
-    eqbm_timestep = 50000
+    eqbm_timestep = 5000
     thermo_off_timestep = eqbm_timestep
         # = 0:              thermo off (use VV the whole time)
         # = eqbm_timestep:  bring to desired temperature, then begin data collection (recommended)
@@ -1175,7 +1190,7 @@ def main():
     thinking_time = end_setup - start_setup
     print(f"\nProgram setup took {thinking_time:.4f} s.")
 
-    test_positions, test_velocities = initialize_particle_system("liquid256.txt", 1, temp_des)
+    test_positions, test_velocities = initialize_particle_system("liquid1024.txt", 1, temp_des)
 
     start_system_setup = time.time()
     system = ParticleSystem(test_positions, test_velocities, r_cut, 
