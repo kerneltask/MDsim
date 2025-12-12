@@ -4,9 +4,15 @@ MDsim contains three Python programs for molecular dynamics simulation of Lennar
 
 This program was written for 12-623, Molecular Simulation of Materials at Carnegie Mellon University.
 
-MD.py: benchmark program with O(N^2) pair calculations
-MD_verlet_list.py: modification of MD.py that implements Verlet lists for O(N^3/2) pair calculations
-MD_cell_list.py: modification of MD.py that implements cell lists for O(N) pair calculations
+* MD.py: benchmark program with O(N^2) pair calculations
+* MD_verlet_list.py: modification of MD.py that implements Verlet lists for O(N^3/2) pair calculations
+* MD_cell_list.py: modification of MD.py that implements cell lists for O(N) pair calculations
+
+Three initial configuration files are included:
+
+* liquid256.txt
+* liquid1024.txt
+* liquid2048.txt
 
 ## Output
 
